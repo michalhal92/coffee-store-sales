@@ -10,7 +10,7 @@ Celem projektu jest analiza danych sprzedażowych kawiarni w celu zidentyfikowan
 ---
 
 ## 📂 Dane
-- Źródło: [kaggle.com/datasets/reignrichard/coffee-store-sales/data)] 
+- Źródło: [www.kaggle.com/datasets/reignrichard/coffee-store-sales/data)] 
 - Liczba rekordów: 3636
 - Zakres danych: 
 - Kluczowe kolumny:
