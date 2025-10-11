@@ -33,11 +33,3 @@ Celem projektu jest analiza danych sprzedażowych kawiarni w celu zidentyfikowan
 
 
 ---
-
-## 📎 Zawartość repozytorium
-- `data/ - dane 
-- `sql/ – zapytania SQL do analizy  
-- `python/ – analiza w Pythonie  
-- `report/ - raport końcowy i dashboardy
-
----
