@@ -1,10 +1,10 @@
 -----#####----- 1. Przygotowanie danych SQL -----#####-----
 
-# 1. wczytanie danych: plik był w xlsx którego nie mogę wgrać do Big Query importem, musiałem go wczytać przez Google Sheets.
-
+# 1. wczytanie danych: plik był w xlsx którego nie mogę wgrać do Big Query importem, musiałem go wczytać przez Google Sheets. 
+      
 --- liczba rekordów 3636
 
---- sprawdzenie tabeli i typów danych w kolumnach
+--- sprawdzenie tabeli i typów danych w kolumnach - money wydaje się liczbowa, w bazie jest string, do sprawdzenia
 
 # 2. sprawdzenie przykładowych danych
 SELECT *
