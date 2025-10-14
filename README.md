@@ -1,6 +1,6 @@
 # ☕ Analiza sprzedaży w kawiarni
 
-## 🎯 Cel projektu1. 
+## 🎯 Cel projektu 
 **1. Optymalizacja Koszyka**
 Ustalenie średniej wartości zamówienia (AOV) i liczby produktów w koszyku (Items Per Order) w celu zwiększenia dosprzedaży.
 
