@@ -12,7 +12,7 @@ SELECT
     MIN(money) AS min_price,
     MAX(money) AS max_price
 FROM
-    `sales.sales`
+    `sales.sales_clean`
 GROUP BY
     coffee_name,
     Monthsort,
@@ -31,7 +31,7 @@ SELECT
     MIN(money) AS min_price,
     MAX(money) AS max_price
 FROM
-    `sales.sales`
+    `sales.sales_clean`
 GROUP BY
     coffee_name,
     hour_of_day
@@ -50,7 +50,7 @@ SELECT
     -- Obliczenie średniej ceny dla danego produktu w danej porze dnia
     ROUND(AVG(money), 2) AS avg_time_of_day_price
 FROM
-    `sales.sales` -- Używamy tabeli 'sales_clean'
+    `sales.sales_clean`
 GROUP BY
     coffee_name,
     Time_of_Day
@@ -71,7 +71,7 @@ SELECT
     -- Obliczenie średniej ceny dla danego produktu i metody płatności
     ROUND(AVG(money), 2) AS avg_payment_price
 FROM
-    `sales.sales`
+    `sales.sales_clean`
 GROUP BY
     coffee_name,
     cash_type
@@ -86,7 +86,7 @@ ORDER BY
 # sprawdzam ręcznie na przykładzie jednego typu kawy
 SELECT
       *
-FROM `sales.sales`
+FROM `sales.sales_clean`
 WHERE coffee_name = 'Espresso'
 ORDER BY datetime;
 
@@ -110,7 +110,7 @@ SELECT
     -- Obliczenie średniej ceny dla danego produktu i metody płatności
     ROUND(AVG(money), 2) AS avg_payment_price
 FROM
-    `sales.sales`
+    `sales.sales_clean`
 GROUP BY
     coffee_name,
     cash_type,
@@ -128,7 +128,7 @@ ORDER BY
 # sprawdzam ręcznie inny typ kawy - Americano
 
     SELECT *
-    FROM `sales.sales`
+    FROM `sales.sales_clean`
     where coffee_name = 'Americano'
     ORDER BY datetime;
 
@@ -151,7 +151,7 @@ ORDER BY
 ---założenia: 
 ----klienci z kartą: card is not null + ta same wartości datetime i card
 ----klienci bez karty: card is null + te same wartosci datetime i cash_type
----W wyniku kilku testów najlepiej sprawdziła się metoda pogrupowania transakcji wg czasu, ustaliłem 300 sekund jako kompromis między zbyt dużą granularnością a zbyt dużym zakresem
+---W wyniku kilku testów najlepiej sprawdziła się metoda pogrupowania transakcji wg czasu, ustaliłem 300 sekund między timestampami jako kompromis między zbyt dużą granularnością a zbyt dużym zakresem
 
 WITH RankedTransactions AS (
     -- 1. Przygotowanie danych i stworzenie unikalnego klucza klienta
@@ -189,7 +189,7 @@ SELECT
    
     -- Tworzenie unikalnego ID dla każdego wiersza
     FORMAT('%t', FIRST_VALUE(t.datetime)
-        OVER (PARTITION BY t.customer_key, t.order_group_id ORDER BY t.datetime)) || '_' || t.customer_key AS final_order_id,
+        OVER (PARTITION BY t.customer_key, t.order_group_id ORDER BY t.datetime)) || '_' || t.customer_key AS order_id,
    
     -- Agregacja liczby produktów na poziomie order_id (funkcja okienkowa)
     COUNT(*)
@@ -204,9 +204,6 @@ FROM
 ORDER BY
     t.datetime;
 
-SELECT
-      DISTINCT(order_id)
-FROM `sales.sales_transactions`
 --- kwerenda łączy dość sporo rekordów, tworząc 2984 transakcji z 3636 rekordów
 --- wyrywkowo sprawdzone są wiarygodnie powiązane, przy kartach można mieć pewność, przy gotówce duże prawdopodobieństwo. Ewentualne błedy w cash nie powinny mieć istotnego znaczenia przy małym udziale tego typu płatności
 
@@ -273,3 +270,369 @@ FROM
     OrderStarts t;
 
 --- stworzona nowa tabela sales_transaction zawierająca zmienne dotyczące transakcji wieloproduktowych.
+
+### 4. Wskaźniki Efektywności i Czasu (AOV, Items Per Order, Sezonowość)
+#Cel: Efektywność Operacyjna i Analiza Sezonowości
+#Akcje: Obliczenie AOV, Items Per Order, Total Revenue i Total Orders w podziale na Month_name, Weekday, hour_of_day i cash_type.\
+
+SELECT
+    -- Wymiary czasowe i segmentacyjne
+    Month_name,
+    Monthsort,      
+    Weekday,
+    Weekdaysort,    
+    Time_of_Day,
+    hour_of_day,
+    cash_type,      
+    
+    -- Wskaźniki ilościowe i wartościowe
+    COUNT(DISTINCT order_id) AS total_orders,        -- Liczba UNIKALNYCH ZAMÓWIEŃ
+    COUNT(*) AS total_items_sold,                 -- Całkowita liczba sprzedanych produktów (suma wierszy)
+    SUM(total_value_of_order) AS total_revenue,      -- Całkowity przychód 
+    
+    -- Średnie wartości
+    ROUND(AVG(total_value_of_order), 2) AS average_order_value, ---AOV
+    ROUND(AVG(total_products_in_order), 2) AS units_per_transaction ---UPT
+
+FROM
+    `sales.sales_transactions`
+GROUP BY
+    1, 2, 3, 4, 5, 6, 7 
+ORDER BY
+    Monthsort, Weekdaysort, hour_of_day;
+
+--- stworzona tabela pokazuje total_orders, total_items_sold, total revenue, AOV i UPT w podziale na miesiace, dni tygodnia,pory dnia i godziny
+--- umożliwia to podstawową analizę sprzedaży w czasie
+
+#Etap 5: Analiza Sprzedaży Wiązanej (MBA) 🧺
+#Cel: Identyfikacja wzorców zakupowych.
+#Akcja: Ustalenie najczęściej kupowanych par produktów (product_a, product_b) i ich częstotliwości (zgodnie z kodem zaproponowanym w mojej pierwszej odpowiedzi).
+
+# sprawdzam jakie pary produktowe są najczęściej występujące
+
+### ETAP 5: ANALIZA SPRZEDAŻY WIĄZANEJ (MBA) - NAJCZĘSTSZE PARY
+
+SELECT
+    t1.coffee_name AS product_a,
+    t2.coffee_name AS product_b,
+    COUNT(DISTINCT t1.order_id) AS co_occurrence_count -- Liczba transakcji, w których wystąpiły oba produkty
+FROM
+    `sales.sales_transactions` t1
+JOIN
+    `sales.sales_transactions` t2 --- samozłączenie
+    ON t1.order_id = t2.order_id -- Warunek 1: Muszą być w tej samej transakcji
+    AND t1.coffee_name < t2.coffee_name -- Warunek 2: Eliminacja duplikatów (A, B) i symetrycznych par (B, A)
+GROUP BY 
+    1, 2
+ORDER BY
+    co_occurrence_count DESC
+LIMIT 10;
+
+---- top 4 łączonych kaw to 2x warian kawy z mlekiem (Americano with Milk, Latte, Cappuccino, Hot Chocolate), 7/10 top par zawiera któryś wariant kawy z mlekiem
+
+# obliczam wskaźniki Support, Confidencje, Lift
+
+WITH TotalOrders AS (
+    -- 1. Całkowita liczba unikalnych transakcji (N)
+    SELECT 
+        COUNT(DISTINCT order_id) AS total_count
+    FROM 
+        `sales.sales_transactions`
+),
+IndividualCounts AS (
+    -- 2. Liczba transakcji dla każdego pojedynczego produktu: Count(A) i Count(B)
+    SELECT 
+        coffee_name, -- ZMIANA: product_name -> coffee_name
+        COUNT(DISTINCT order_id) AS individual_count
+    FROM 
+        `sales.sales_transactions`
+    GROUP BY 1
+),
+PairCoOccurrence AS (
+    -- 3. Liczba transakcji zawierających parę produktów: Count(A i B)
+    SELECT
+        t1.coffee_name AS coffee_a, -- ZMIANA: product_name -> coffee_name
+        t2.coffee_name AS coffee_b, -- ZMIANA: product_name -> coffee_name
+        COUNT(DISTINCT t1.order_id) AS co_occurrence_count
+    FROM
+        `sales.sales_transactions` t1
+    JOIN
+        `sales.sales_transactions` t2
+        ON t1.order_id = t2.order_id
+        AND t1.coffee_name < t2.coffee_name -- ZMIANA: product_name -> coffee_name
+    GROUP BY 1, 2
+)
+SELECT
+    p.coffee_a,
+    p.coffee_b,
+    p.co_occurrence_count,
+    
+    -- 1. SUPPORT S(A^B)
+    p.co_occurrence_count / t.total_count AS Support_AB,
+
+    -- 2. CONFIDENCE C(A -> B)
+    p.co_occurrence_count / cA.individual_count AS Confidence_A_to_B,
+
+    -- 3. CONFIDENCE C(B -> A)
+    p.co_occurrence_count / cB.individual_count AS Confidence_B_to_A,
+
+    -- 4. LIFT
+    (p.co_occurrence_count / t.total_count) 
+    / ((cA.individual_count / t.total_count) * (cB.individual_count / t.total_count)) AS Lift
+
+FROM
+    PairCoOccurrence p
+CROSS JOIN
+    TotalOrders t
+JOIN
+    IndividualCounts cA ON p.coffee_a = cA.coffee_name -- ZMIANA: product_name -> coffee_name
+JOIN
+    IndividualCounts cB ON p.coffee_b = cB.coffee_name -- ZMIANA: product_name -> coffee_name
+ORDER BY
+    p.co_occurrence_count DESC
+LIMIT 10;
+
+--- z uwagi na stosunkowo małą ilość transakcji wieloproduktowych (ok 600 tj ok 20% wszystkich transakcji) trudno jest o wyznaczenie prostych wskaźników potwierdających zasadność tych par pod kątem cross-sellingu.
+--- kawy są substytutami względem siebie, jeżeli chcielibyśmy zwiększać koszyk możemy podjąć dwie strategie 
+---  1. rabat przy dwóch produktach - może zformalizować już istniejący wzorzec zakupowy i ułatwić przyszłą analizę (bezpośrednie grupowanie w faktyczne transakcje), ściągnąć klientów na spotkania stacjonarne zwiększając obrót kosztem zysku (lepsza rotacja, większa atrakcyjność dla klienta)
+---  2. rozszerzenie asortymentu do cross-sellingu - niski LIFT między kawami sugeruje że budowanie faktycznego koszyka warto zrobić poprzez nowe produkty uzupełniające - np słodycze, przekąski, dania, napoje butelkowane na wynos
+
+#Etap 6: Analiza Wartości i Lojalności Klienta (CLV/Frequency) 💳
+#Cel: Określenie, którzy klienci (głównie z kartą) generują największy przychód i jak często wracają.
+##Akcja: Obliczenie Liczby Transakcji na klienta i Skumulowanej Wartości Zakupów (Lifetime_Value), grupowanie po customer_key (zgodnie z kodem zaproponowanym w mojej ostatniej odpowiedzi).
+
+### ETAP 6: ANALIZA WARTOŚCI I LOJALNOŚCI KLIENTA 
+
+WITH CustomerMetrics AS (
+    -- 1. Rekonstrukcja ID Klienta i Obliczenie Metryk
+    SELECT
+        CASE
+            WHEN t.card IS NOT NULL THEN t.card
+            ELSE 'CASH_' || t.cash_type
+        END AS card_id,
+
+        t.order_id,
+        t.total_value_of_order,
+        t.total_products_in_order, -- DODANO: Ilość produktów w pojedynczej transakcji
+        t.datetime 
+    FROM
+        `sales.sales_transactions` t
+    WHERE
+        t.card IS NOT NULL
+),
+RecencyDate AS (
+    -- 2. Ustalenie daty referencyjnej
+    SELECT
+        MAX(DATE(datetime)) AS max_date
+    FROM
+        `sales.sales_transactions`
+)
+SELECT
+    cm.card_id AS card, 
+    'CARD' AS customer_type, 
+    
+    -- R: Recency (Aktualność)
+    DATE_DIFF(
+        (SELECT max_date FROM RecencyDate),
+        MAX(DATE(cm.datetime)),
+        DAY
+    ) AS R_recency_days_since_last_purchase,
+    
+    -- F: Frequency (Częstotliwość)
+    COUNT(DISTINCT cm.order_id) AS F_total_orders,
+    
+    -- M: Monetary (Wartość Pieniężna / LTV)
+    SUM(cm.total_value_of_order) AS M_lifetime_value,
+    
+    -- DODANA NOWA METRYKA: Średnia Ilość Produktów w Koszyku Klienta (UPT)
+    AVG(cm.total_products_in_order) AS avg_products_per_order_per_customer,
+    
+    -- Dodatkowa metryka AOV (Średnia Wartość Zamówienia)
+    AVG(cm.total_value_of_order) AS avg_order_value_per_customer
+    
+FROM
+    CustomerMetrics cm
+GROUP BY
+    1, 2 
+HAVING
+    F_total_orders > 1
+ORDER BY
+    M_lifetime_value DESC;
+
+--- tabela przedstawia klientów którzy zostawili najwięcej pieniędzy w kawiarni. Dane dają możliwość segmentacji i w zależnosci od strategii kawiarni i możliwości finansowych / technicznych można podjąć celowane działania na utrzymanie (obsługa), optymalizację (upselling), przypomnienie o sobie (sms z przypomnieniem, rabatem, gratisem), odzyskanie (analogicznie z większą zachętą) 
+
+#Etap 7: Analiza Trendów i Wzrostu Sprzedaży (Growth) 📈
+#Cel: Ocena wydajności sprzedaży w czasie.
+#Akcja:
+#Tempo Wzrostu (Miesięczne/Kwartalne): Porównanie Total_Revenue i Total_Orders z poprzednimi okresami (wykorzystanie funkcji LAG na danych zagregowanych miesięcznie).
+#Analiza Sezonowości: Total_Revenue wg Dnia Tygodnia / Miesiąca.
+
+ # Wzrost sprzedaży miesiąc do miesiąca MoM
+WITH MonthlySummary AS (
+    -- Agregacja danych do poziomu miesięcznego
+    SELECT
+        FORMAT_DATE('%Y-%m', DATE(t.datetime)) AS sales_month,
+        COUNT(DISTINCT t.order_id) AS monthly_orders,
+        SUM(t.money) AS monthly_revenue
+    FROM
+        `sales.sales_transactions` t
+    GROUP BY 1
+    ORDER BY 1
+)
+SELECT
+    s.sales_month,
+    s.monthly_orders,
+    s.monthly_revenue,
+    
+    -- Wzrost MoM dla Liczby Zamówień
+    ROUND(
+        (s.monthly_orders - LAG(s.monthly_orders, 1) OVER (ORDER BY s.sales_month)) 
+        / LAG(s.monthly_orders, 1) OVER (ORDER BY s.sales_month),
+        4
+    ) AS orders_growth_mom,
+        
+    -- Wzrost MoM dla Przychodu
+    ROUND(
+        (s.monthly_revenue - LAG(s.monthly_revenue, 1) OVER (ORDER BY s.sales_month)) 
+        / LAG(s.monthly_revenue, 1) OVER (ORDER BY s.sales_month),
+        4
+    ) AS revenue_growth_mom
+FROM
+    MonthlySummary s
+ORDER BY
+    s.sales_month;
+
+--- pokazuje trendy do analizy zmiennosci wg miesięcy
+
+# ANALIZA SEZONOWOŚCI WG DNIA TYGODNIA
+--- cortowanie wg Weekdaysort (rozkład w tygodniu)
+SELECT
+    t.Weekday,
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+GROUP BY
+    1, t.Weekdaysort
+ORDER BY
+    t.Weekdaysort;
+
+--- sortowanie wg total_orders (Największy Ruch)
+SELECT
+    t.Weekday, 
+    
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+GROUP BY
+    1, t.WeekdaySort
+ORDER BY
+    total_orders DESC;
+
+---Sortowanie wg total_revenue (Najbardziej Dochodowy)
+SELECT
+    t.Weekday, 
+    
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+GROUP BY
+    1, t.WeekdaySort
+ORDER BY
+    total_revenue DESC;
+
+--- ilość transakcji i przychód jest największy pn-pt, sporo mniejszy w sb - nd, jednak średnia wartość zamówienia jest istotnie większa w sb-nd. Warto to uwzględnić w grafiku personelu (ilość osób danego dnia, większe zapotrzebowanie w środku tygodnia, szczególnie poniedziałek). Akcje promocyjne też można dostosować do dnia tygodnia (klientów w sb-nd jest mniej ale są skłonni wydać więcej)
+
+# sezonowość wg dnia tygodnia i godziny
+SELECT
+    -- Nazwa dnia tygodnia (dla czytelności)
+    t.Weekday, 
+    
+    -- ID dnia tygodnia (do sortowania, zakładając, że istnieje)
+    t.WeekdaySort, 
+    
+    -- Wyodrębnienie godziny (0-23)
+    CAST(EXTRACT(HOUR FROM t.datetime) AS INT64) AS hour_of_day,
+    
+    -- Metryki zagregowane
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+GROUP BY
+    1, 2, 3
+ORDER BY
+    -- Sortowanie logiczne: najpierw dzień (Pon-Niedz), potem godzina (od 0 do 23)
+    t.WeekdaySort,
+    hour_of_day;
+ 
+ --- daje szczegółowy rozkład godzinowy w dniach tygodnia - przydatne do ustawiania godzin pracy obsady
+
+# filtrowanie konkretnego dnia tygodnia - tutaj poniedziałek jako dzień z największym ruchem
+SELECT
+    CAST(EXTRACT(HOUR FROM t.datetime) AS INT64) AS hour_of_day,
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+WHERE
+    t.Weekday = 'pon.' -- Dostosuj to do nazewnictwa w Twojej tabeli (np. 'Monday' lub 'pon.')
+GROUP BY
+    1
+ORDER BY
+    hour_of_day;
+
+# sezonowość wg pory dnia -- KWERENDA: ANALIZA SPRZEDAŻY WEDŁUG PORY DNIA
+SELECT
+    t.Time_of_Day, -- Użycie istniejącej kolumny kategoryzującej porę dnia
+    
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+GROUP BY
+    1
+ORDER BY
+    t.Time_of_Day; -- ZMIANA: Sortowanie bezpośrednio po kolumnie Time_of_Day
+
+--- rozkład wg pory dnia
+
+WITH TimeSegmentHours AS (
+    -- Definicja długości trwania każdej pory dnia w godzinach (PRZYKŁADOWE PRZYPISANIE)
+    SELECT DISTINCT
+        t.Time_of_Day,
+        CASE t.Time_of_Day
+            WHEN 'Poranek (6:00-10:59)' THEN 5
+            WHEN 'Lunch (11:00-13:59)' THEN 3
+            WHEN 'Popołudnie (14:00-17:59)' THEN 4
+            WHEN 'Wieczór/Poza Szczytem' THEN 12 -- Zakładając, że to reszta doby
+            ELSE NULL
+        END AS segment_hours
+    FROM
+        `sales.sales_transactions` t
+)
+SELECT
+    t.Time_of_Day,
+    SUM(t.money) AS total_revenue,
+    COUNT(DISTINCT t.order_id) AS total_orders,
+    
+    -- NOWY WSKAŹNIK: Średnia Sprzedaż na Godzinę Otwarcia
+    SUM(t.money) / th.segment_hours AS revenue_per_segment_hour,
+    
+    AVG(t.total_value_of_order) AS avg_order_value
+FROM
+    `sales.sales_transactions` t
+JOIN
+    TimeSegmentHours th ON t.Time_of_Day = th.Time_of_Day
+GROUP BY
+    1, th.segment_hours
+ORDER BY
+    revenue_per_segment_hour DESC; -- Sortowanie według najbardziej rentownej godziny
