@@ -1,3 +1,5 @@
+-----#####----- 2. Analiza eksploracyjna -----#####-----
+
 
 ### 1. analiza spójności cen konkretnych produktów
 
@@ -397,7 +399,7 @@ LIMIT 10;
 ---  1. rabat przy dwóch produktach - może zformalizować już istniejący wzorzec zakupowy i ułatwić przyszłą analizę (bezpośrednie grupowanie w faktyczne transakcje), ściągnąć klientów na spotkania stacjonarne zwiększając obrót kosztem zysku (lepsza rotacja, większa atrakcyjność dla klienta)
 ---  2. rozszerzenie asortymentu do cross-sellingu - niski LIFT między kawami sugeruje że budowanie faktycznego koszyka warto zrobić poprzez nowe produkty uzupełniające - np słodycze, przekąski, dania, napoje butelkowane na wynos
 
-#Etap 6: Analiza Wartości i Lojalności Klienta (CLV/Frequency) 💳
+#Etap 6: Analiza Wartości i Lojalności Klienta (CLV/Frequency/CRR)
 #Cel: Określenie, którzy klienci (głównie z kartą) generują największy przychód i jak często wracają.
 ##Akcja: Obliczenie Liczby Transakcji na klienta i Skumulowanej Wartości Zakupów (Lifetime_Value), grupowanie po customer_key (zgodnie z kodem zaproponowanym w mojej ostatniej odpowiedzi).
 
@@ -460,6 +462,133 @@ ORDER BY
     M_lifetime_value DESC;
 
 --- tabela przedstawia klientów którzy zostawili najwięcej pieniędzy w kawiarni. Dane dają możliwość segmentacji i w zależnosci od strategii kawiarni i możliwości finansowych / technicznych można podjąć celowane działania na utrzymanie (obsługa), optymalizację (upselling), przypomnienie o sobie (sms z przypomnieniem, rabatem, gratisem), odzyskanie (analogicznie z większą zachętą) 
+# CRR - client_retention_rate
+# CRR MoM
+WITH MonthlyCustomers AS (
+    -- 1. Identyfikacja unikalnych klientów w każdym miesiącu (Wykluczenie 2025-03)
+    SELECT DISTINCT
+        FORMAT_DATE('%Y-%m', date) AS period_month,
+        card
+    FROM
+        `sales.sales_transactions`
+    WHERE
+        card IS NOT NULL 
+        -- KLUCZOWA ZMIANA: WYKLUCZENIE NIEPEŁNEGO MIESIĄCA
+        AND FORMAT_DATE('%Y-%m', date) < '2025-03' 
+),
+RetentionData AS (
+    -- 2. Ustalenie, czy klient powrócił w następnym miesiącu
+    SELECT
+        period_month,
+        card,
+        LAG(period_month, 1) 
+            OVER (PARTITION BY card ORDER BY period_month) AS previous_month_active
+    FROM
+        MonthlyCustomers
+),
+MonthlyMetrics AS (
+    -- 3. Agregacja miar na poziomie miesiąca
+    SELECT
+        period_month,
+        COUNT(card) AS end_period_customers,
+        SUM(CASE WHEN previous_month_active IS NOT NULL THEN 1 ELSE 0 END) AS retained_customers
+    FROM
+        RetentionData
+    GROUP BY
+        period_month
+),
+FinalMetrics AS (
+    -- 4. Ustalenie bazy klientów na początku okresu (Start)
+    SELECT
+        m.*,
+        LAG(m.end_period_customers) OVER (ORDER BY m.period_month) AS start_period_customers
+    FROM
+        MonthlyMetrics m
+)
+SELECT
+    period_month,
+    end_period_customers,
+    start_period_customers,
+    retained_customers,
+    -- Obliczenie CRR
+    ROUND(
+        (retained_customers * 100.0) / start_period_customers, 2
+    ) AS monthly_retention_rate
+FROM
+    FinalMetrics
+WHERE
+    start_period_customers IS NOT NULL
+ORDER BY
+    period_month;
+
+--- Usunąłem marzec 2025 jako niepełny miesiąc co zaburza analizę
+--- 2025-02 jeset anomalią kalendarza - początek miesiąca to sobota, w weekend jest mniej klientów
+
+# CRR QoQ
+WITH QuarterlyCustomers AS (
+    -- 1. Identyfikacja unikalnych klientów w każdym kwartale
+    SELECT DISTINCT
+        -- Tworzenie klucza kwartału: ROK-Q[Numer Kwartału] (np. 2024-Q1)
+        FORMAT_DATE('%Y-Q', date) || CAST(EXTRACT(QUARTER FROM date) AS STRING) AS period_quarter,
+        card
+    FROM
+        `sales.sales_transactions`
+    WHERE
+        card IS NOT NULL 
+        -- KLUCZOWA ZMIANA: WYKLUCZENIE NIEPEŁNEGO MIESIĄCA/KWARTAŁU
+        -- Q1 2025 (Styczeń, Luty, Marzec) jest niepełny, więc wykluczamy cały Q1 2025
+        AND FORMAT_DATE('%Y-Q', date) < '2025-Q1'
+),
+RetentionData AS (
+    -- 2. Ustalenie, czy klient powrócił w następnym kwartale
+    SELECT
+        period_quarter,
+        card,
+        -- Czas poprzedniego okresu, w którym klient był aktywny.
+        LAG(period_quarter, 1) 
+            OVER (PARTITION BY card ORDER BY period_quarter) AS previous_quarter_active
+    FROM
+        QuarterlyCustomers
+),
+QuarterlyMetrics AS (
+    -- 3. Agregacja miar na poziomie kwartału
+    SELECT
+        period_quarter,
+        COUNT(card) AS end_period_customers, -- Klienci na Koniec Okresu (Baza)
+        -- Klienci UTRZYMANI: byli aktywni w bieżącym kwartale ORAZ w poprzednim kwartale.
+        SUM(CASE WHEN previous_quarter_active IS NOT NULL THEN 1 ELSE 0 END) AS retained_customers
+    FROM
+        RetentionData
+    GROUP BY
+        period_quarter
+),
+FinalMetrics AS (
+    -- 4. Ustalenie bazy klientów na początku okresu (Klienci na Start Okresu)
+    SELECT
+        m.*,
+        -- Klienci na koniec Q-1 to baza na start Q. Używamy LAG na end_period_customers.
+        LAG(m.end_period_customers) OVER (ORDER BY m.period_quarter) AS start_period_customers
+    FROM
+        QuarterlyMetrics m
+)
+SELECT
+    period_quarter,
+    end_period_customers,
+    start_period_customers,
+    retained_customers,
+    -- Obliczenie CRR: CRR = (Retained Customers / Start Period Customers) * 100
+    ROUND(
+        (retained_customers * 100.0) / start_period_customers, 2
+    ) AS quarterly_retention_rate
+FROM
+    FinalMetrics
+WHERE
+    start_period_customers IS NOT NULL -- Pomijamy pierwszy kwartał
+ORDER BY
+    period_quarter;
+
+--- Q1 2024 został pominięty (baza jest od 03-2024)
+--- Q1 2025 jest niepełny ale brakuje 9/90 dni - wynik jest zaburzony ale może stanowić pewną informacje
 
 #Etap 7: Analiza Trendów i Wzrostu Sprzedaży (Growth) 📈
 #Cel: Ocena wydajności sprzedaży w czasie.
@@ -467,7 +596,7 @@ ORDER BY
 #Tempo Wzrostu (Miesięczne/Kwartalne): Porównanie Total_Revenue i Total_Orders z poprzednimi okresami (wykorzystanie funkcji LAG na danych zagregowanych miesięcznie).
 #Analiza Sezonowości: Total_Revenue wg Dnia Tygodnia / Miesiąca.
 
- # Wzrost sprzedaży miesiąc do miesiąca MoM
+# Wzrost sprzedaży MoM
 WITH MonthlySummary AS (
     -- Agregacja danych do poziomu miesięcznego
     SELECT
@@ -484,14 +613,14 @@ SELECT
     s.monthly_orders,
     s.monthly_revenue,
     
-    -- Wzrost MoM dla Liczby Zamówień
+    -- Wzrost Liczby Zamówień MoM
     ROUND(
         (s.monthly_orders - LAG(s.monthly_orders, 1) OVER (ORDER BY s.sales_month)) 
         / LAG(s.monthly_orders, 1) OVER (ORDER BY s.sales_month),
         4
     ) AS orders_growth_mom,
         
-    -- Wzrost MoM dla Przychodu
+    -- Wzrost Przychodu MoM
     ROUND(
         (s.monthly_revenue - LAG(s.monthly_revenue, 1) OVER (ORDER BY s.sales_month)) 
         / LAG(s.monthly_revenue, 1) OVER (ORDER BY s.sales_month),
@@ -503,6 +632,60 @@ ORDER BY
     s.sales_month;
 
 --- pokazuje trendy do analizy zmiennosci wg miesięcy
+
+# Wzrost sprzedaży QoQ
+WITH QuarterlySummary AS (
+    -- 1. Agregacja danych do poziomu kwartalnego
+    SELECT
+        -- Zmiana grupowania na ROK-Q[Numer Kwartału] (np. 2024-Q2)
+        FORMAT_DATE('%Y-Q', DATE(t.datetime)) || CAST(EXTRACT(QUARTER FROM DATE(t.datetime)) AS STRING) AS sales_quarter,
+        
+        COUNT(DISTINCT t.order_id) AS quarterly_orders,
+        SUM(t.total_value_of_order) AS quarterly_revenue
+    FROM
+        `sales.sales_transactions` t
+    -- Filtrowanie dat: Wykluczamy niepełny Q1 2025 (Marzec 2025)
+    WHERE
+        FORMAT_DATE('%Y-%m', DATE(t.datetime)) < '2025-03'
+    GROUP BY 1
+    ORDER BY 1
+),
+QoQCalculations AS (
+    -- 2. Obliczenia bazowe (LAG)
+    SELECT
+        s.sales_quarter,
+        s.quarterly_orders,
+        s.quarterly_revenue,
+        
+        -- Bazowe wartości z poprzedniego kwartału (Mianownik dla Wzrostu)
+        LAG(s.quarterly_orders, 1) OVER (ORDER BY s.sales_quarter) AS previous_orders,
+        LAG(s.quarterly_revenue, 1) OVER (ORDER BY s.sales_quarter) AS previous_revenue
+    FROM
+        QuarterlySummary s
+)
+SELECT
+    q.sales_quarter,
+    q.quarterly_orders,
+    q.quarterly_revenue,
+    
+    -- Wzrost Liczby Zamówień QoQ
+    ROUND(
+        (q.quarterly_orders - q.previous_orders) / q.previous_orders,
+        4
+    ) AS orders_growth_qoq,
+        
+    -- Wzrost Przychodu QoQ
+    ROUND(
+        (q.quarterly_revenue - q.previous_revenue) / q.previous_revenue,
+        4
+    ) AS revenue_growth_qoq
+FROM
+    QoQCalculations q
+-- Filtrujemy, aby usunąć pierwszy kwartał bez danych bazowych
+WHERE
+    q.previous_orders IS NOT NULL 
+ORDER BY
+    q.sales_quarter;
 
 # ANALIZA SEZONOWOŚCI WG DNIA TYGODNIA
 --- cortowanie wg Weekdaysort (rozkład w tygodniu)
@@ -583,7 +766,7 @@ SELECT
 FROM
     `sales.sales_transactions` t
 WHERE
-    t.Weekday = 'pon.' -- Dostosuj to do nazewnictwa w Twojej tabeli (np. 'Monday' lub 'pon.')
+    t.Weekday = 'pon.' 
 GROUP BY
     1
 ORDER BY
@@ -605,34 +788,32 @@ ORDER BY
 
 --- rozkład wg pory dnia
 
-WITH TimeSegmentHours AS (
-    -- Definicja długości trwania każdej pory dnia w godzinach (PRZYKŁADOWE PRZYPISANIE)
-    SELECT DISTINCT
-        t.Time_of_Day,
-        CASE t.Time_of_Day
-            WHEN 'Poranek (6:00-10:59)' THEN 5
-            WHEN 'Lunch (11:00-13:59)' THEN 3
-            WHEN 'Popołudnie (14:00-17:59)' THEN 4
-            WHEN 'Wieczór/Poza Szczytem' THEN 12 -- Zakładając, że to reszta doby
-            ELSE NULL
-        END AS segment_hours
-    FROM
-        `sales.sales_transactions` t
-)
+
+# Wtap 8. Analiza wariancji
+
+# Analiza Wariancji Transakcji (Odchylenie od Średniej Dziennej AOV)
 SELECT
-    t.Time_of_Day,
-    SUM(t.money) AS total_revenue,
-    COUNT(DISTINCT t.order_id) AS total_orders,
+    t.order_id,
+    DATE(t.datetime) AS order_date,
+    t.total_value_of_order,
     
-    -- NOWY WSKAŹNIK: Średnia Sprzedaż na Godzinę Otwarcia
-    SUM(t.money) / th.segment_hours AS revenue_per_segment_hour,
+    -- Obliczenie średniej wartości zamówienia dla całego zbioru (Overall AOV)
+    ROUND(AVG(t.total_value_of_order) OVER (), 2) AS avg_overall_aov,
     
-    AVG(t.total_value_of_order) AS avg_order_value
+    -- Średnia wartość zamówienia z danego dnia (Daily AOV)
+    -- Użycie PARTITION BY DATE(t.datetime) gwarantuje, że obliczamy średnią tylko dla transakcji z tego samego dnia
+    ROUND(AVG(t.total_value_of_order) OVER (PARTITION BY DATE(t.datetime)), 2) AS avg_daily_aov,
+    
+    -- Różnica Procentowa od Średniej Dziennej
+    -- Wzór: ((Wartość Transakcji - Średnia Dzienna) / Średnia Dzienna) * 100
+    ROUND(
+        (t.total_value_of_order - AVG(t.total_value_of_order) OVER (PARTITION BY DATE(t.datetime))) 
+        / AVG(t.total_value_of_order) OVER (PARTITION BY DATE(t.datetime)) * 100, 
+        2
+    ) AS daily_aov_variance_percent
+
 FROM
     `sales.sales_transactions` t
-JOIN
-    TimeSegmentHours th ON t.Time_of_Day = th.Time_of_Day
-GROUP BY
-    1, th.segment_hours
 ORDER BY
-    revenue_per_segment_hour DESC; -- Sortowanie według najbardziej rentownej godziny
+    daily_aov_variance_percent DESC -- Sortowanie pozwala zobaczyć największe anomalie (wyjątkowo duże zamówienia)
+LIMIT 100;
