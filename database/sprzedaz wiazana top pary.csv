@@ -1,0 +1,11 @@
+product_a,product_b,co_occurrence_count
+Americano with Milk,Latte,36
+Americano with Milk,Cappuccino,31
+Hot Chocolate,Latte,30
+Cappuccino,Latte,29
+Americano,Americano with Milk,28
+Cocoa,Latte,18
+Americano,Cappuccino,17
+Cappuccino,Hot Chocolate,14
+Americano,Espresso,12
+Americano,Cortado,12
